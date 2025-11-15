@@ -1,0 +1,193 @@
+name: Publish Bottles
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g., v1.0.0 or v1.0.0-osdev)"
+        required: true
+        type: string
+      run_id:
+        description: "Workflow run ID from Build Bottles workflow (leave empty to use latest)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish-bottles:
+    name: Publish bottles and update formula
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine formula from version tag
+        id: determine
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Check version tag (e.g., v1.0.0-osdev)
+          if [[ "$VERSION" == *"-osdev" ]]; then
+            echo "formula_name=x86_64-linux-musl-osdev" >> $GITHUB_OUTPUT
+            echo "Detected osdev variant from version tag: ${VERSION}"
+          else
+            echo "formula_name=x86_64-linux-musl" >> $GITHUB_OUTPUT
+            echo "Using official musl variant for version: ${VERSION}"
+          fi
+
+      - name: Download bottles from workflow run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.run_id }}" ]; then
+            RUN_ID="${{ inputs.run_id }}"
+          else
+            # Get the latest successful run of build-bottles workflow
+            RUN_ID=$(gh run list --workflow=build-bottles.yml --status=success --limit=1 --json databaseId --jq '.[0].databaseId')
+          fi
+
+          echo "Downloading artifacts from run ID: ${RUN_ID}"
+
+          # Download all artifacts from that run
+          gh run download "${RUN_ID}" --pattern 'bottle-*' --pattern 'metadata-*'
+
+      - name: List downloaded artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find . -name '*.bottle.tar.gz' -o -name '*.json'
+
+      - name: Calculate source tarball SHA256
+        id: source_sha
+        run: |
+          wget -q "https://github.com/${{ github.repository }}/archive/refs/tags/${{ inputs.version }}.tar.gz"
+          SOURCE_SHA=$(shasum -a 256 "${{ inputs.version }}.tar.gz" | awk '{print $1}')
+          echo "sha256=${SOURCE_SHA}" >> $GITHUB_OUTPUT
+          rm "${{ inputs.version }}.tar.gz"
+
+      - name: Create tag and release if they don't exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Fetch tags to ensure we have latest state
+          git fetch --tags
+
+          # Check if tag exists
+          if ! git tag -l | grep -q "^${{ inputs.version }}$"; then
+            echo "Tag ${{ inputs.version }} does not exist, creating it..."
+            git tag "${{ inputs.version }}"
+            git push origin "${{ inputs.version }}"
+          else
+            echo "Tag ${{ inputs.version }} already exists"
+          fi
+
+          # Check if release exists
+          if ! gh release view "${{ inputs.version }}" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Release ${{ inputs.version }} does not exist, creating it..."
+            gh release create "${{ inputs.version }}" \
+              --repo "${{ github.repository }}" \
+              --title "${{ inputs.version }}" \
+              --notes "Release ${{ inputs.version }}" \
+              --draft
+          else
+            echo "Release ${{ inputs.version }} already exists"
+          fi
+
+      - name: Upload bottles to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find all bottle files (they're in subdirectories from artifact download)
+          for bottle in */*.bottle.tar.gz; do
+            if [ -f "$bottle" ]; then
+              echo "Uploading ${bottle}..."
+              gh release upload "${{ inputs.version }}" "${bottle}" \
+                --repo "${{ github.repository }}" --clobber
+            fi
+          done
+
+      - name: Update formula with new version and bottle
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha256 }}
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          FORMULA_FILE="Formula/${FORMULA_NAME}.rb"
+
+          # Extract bottle SHA256 from metadata (it's in a subdirectory)
+          BOTTLE_SHA=$(jq -r '.sha256' */bottle-info-arm64_sonoma.json)
+
+          echo "Updating formula with:"
+          echo "  VERSION: ${VERSION}"
+          echo "  SOURCE_SHA: ${SOURCE_SHA}"
+          echo "  BOTTLE_SHA: ${BOTTLE_SHA}"
+          echo ""
+          echo "Formula before updates:"
+          head -11 "$FORMULA_FILE"
+          echo ""
+
+          # Update version in URL
+          sed -i "s|archive/refs/tags/[^\"]*|archive/refs/tags/${VERSION}|g" "$FORMULA_FILE"
+
+          # Update source SHA256 (first occurrence only)
+          sed -i "0,/sha256 \"[0-9a-f]*\"/{s|sha256 \"[0-9a-f]*\"|sha256 \"${SOURCE_SHA}\"|}" "$FORMULA_FILE"
+
+          # Update bottle root_url
+          sed -i "s|releases/download/[^\"]*\"|releases/download/${VERSION}\"|g" "$FORMULA_FILE"
+
+          # Update bottle SHA256
+          sed -i "s|sha256 cellar: :any, arm64_sonoma: \"[0-9a-f]*\"|sha256 cellar: :any, arm64_sonoma: \"${BOTTLE_SHA}\"|" "$FORMULA_FILE"
+
+          echo "Formula after updates:"
+          head -11 "$FORMULA_FILE"
+
+      - name: Commit formula updates
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/${FORMULA_NAME}.rb
+
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to formula, skipping commit"
+          else
+            git commit -m "Update ${FORMULA_NAME} to ${{ inputs.version }} with bottle"
+            git push
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Publish the release (remove draft status)
+          gh release edit "${{ inputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false
+
+      - name: Create summary
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          {
+            echo "# 🍾 Bottles Published: ${FORMULA_NAME}"
+            echo ""
+            echo "**Version:** ${{ inputs.version }}"
+            echo ""
+            echo "## Installation"
+            echo '```bash'
+            echo "brew tap ${{ github.repository }}"
+            echo "brew install ${FORMULA_NAME}"
+            echo '```'
+            echo ""
+            echo "Formula has been updated in the repository."
+          } >> $GITHUB_STEP_SUMMARY

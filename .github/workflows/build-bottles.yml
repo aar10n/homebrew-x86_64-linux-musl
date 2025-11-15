@@ -1,0 +1,219 @@
+name: Build Bottles
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag for bottles (e.g., v1.0.0)"
+        required: true
+        type: string
+      build_repo_ref:
+        description: "x86_64-linux-musl repo ref (branch/tag/commit)"
+        required: false
+        type: string
+        default: "main"
+      musl_git_url:
+        description: "Musl git repository URL"
+        required: false
+        type: string
+        default: "git://git.musl-libc.org/musl"
+      musl_git_branch:
+        description: "Musl git branch"
+        required: false
+        type: string
+        default: "master"
+
+permissions:
+  contents: read
+
+jobs:
+  build-bottles:
+    name: Build bottle for Apple Silicon
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout tap repository
+        uses: actions/checkout@v4
+        with:
+          path: tap
+
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+        with:
+          repository: aar10n/x86_64-linux-musl
+          ref: ${{ inputs.build_repo_ref }}
+          path: x86_64-linux-musl
+
+      - name: Determine formula from musl URL
+        id: determine
+        env:
+          MUSL_URL: ${{ inputs.musl_git_url }}
+        run: |
+          # Check if using osdev-musl
+          if [[ "$MUSL_URL" == *"osdev-musl"* ]]; then
+            echo "formula_name=x86_64-linux-musl-osdev" >> $GITHUB_OUTPUT
+            echo "Building x86_64-linux-musl-osdev (osdev-musl variant)"
+          else
+            echo "formula_name=x86_64-linux-musl" >> $GITHUB_OUTPUT
+            echo "Building x86_64-linux-musl (official musl)"
+          fi
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Install build dependencies
+        run: |
+          brew install gcc@14 wget coreutils texinfo || true
+
+          # Retry texinfo post-install if it failed
+          brew postinstall texinfo 2>/dev/null || true
+
+          # Ensure texinfo is in PATH
+          export PATH="$(brew --prefix texinfo)/bin:$PATH"
+
+          # Verify makeinfo is available
+          which makeinfo
+          makeinfo --version
+
+      - name: Create local source tarball
+        run: |
+          tar czf x86_64-linux-musl-${GITHUB_SHA:0:7}.tar.gz x86_64-linux-musl
+
+      - name: Create temporary formula for CI build
+        env:
+          MUSL_URL: ${{ inputs.musl_git_url }}
+          MUSL_BRANCH: ${{ inputs.musl_git_branch }}
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          # Copy the real formula from tap repo
+          cp tap/Formula/${FORMULA_NAME}.rb ci-formula.rb
+
+          # Replace URL with local tarball for CI
+          TARBALL_PATH="file://$(pwd)/x86_64-linux-musl-${GITHUB_SHA:0:7}.tar.gz"
+          sed -i.bak "s|https://github.com/.*/archive/refs/tags/.*\.tar\.gz|${TARBALL_PATH}|" ci-formula.rb
+
+          # Update musl URL if needed
+          sed -i.bak "s|MUSL_GIT_URL = .*|MUSL_GIT_URL = ${MUSL_URL}|" ci-formula.rb
+          sed -i.bak "s|MUSL_GIT_BRANCH = .*|MUSL_GIT_BRANCH = ${MUSL_BRANCH}|" ci-formula.rb
+
+          rm -f ci-formula.rb.bak
+
+      - name: Create temporary tap
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          mkdir -p $(brew --repository)/Library/Taps/local/homebrew-temp
+          mkdir -p $(brew --repository)/Library/Taps/local/homebrew-temp/Formula
+          cp ci-formula.rb $(brew --repository)/Library/Taps/local/homebrew-temp/Formula/${FORMULA_NAME}.rb
+
+      - name: Build toolchain in bottle mode
+        id: build
+        continue-on-error: true
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_MAKE_JOBS: 1
+        run: |
+          # Ensure texinfo/makeinfo is in PATH for the build
+          export PATH="$(brew --prefix texinfo)/bin:$PATH"
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+
+          brew install --build-bottle --verbose local/temp/${FORMULA_NAME}
+
+      - name: Display build logs on failure
+        if: steps.build.outcome == 'failure'
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          echo "=== Build failed. Displaying full logs ==="
+          LOG_FILE=$(ls -t ~/Library/Logs/Homebrew/${FORMULA_NAME}/*.log 2>/dev/null | head -1)
+          if [ -n "$LOG_FILE" ]; then
+            echo "Full log from: $LOG_FILE"
+            cat "$LOG_FILE"
+          else
+            echo "No log file found"
+          fi
+          exit 1
+
+      - name: Run tests
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          # Formula tests use full paths, so this should work
+          brew test local/temp/${FORMULA_NAME}
+
+          # For additional tests, add keg to PATH since it's keg-only
+          export PATH="$(brew --prefix local/temp/${FORMULA_NAME})/bin:$PATH"
+
+          x86_64-linux-musl-gcc --version
+          echo "int main() { return 0; }" | x86_64-linux-musl-gcc -x c -static - -o test
+          file test
+          rm test
+
+      - name: Create bottle
+        id: bottle
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          ROOT_URL="https://github.com/${{ github.repository }}/releases/download/${{ inputs.version }}"
+          brew bottle --json --root-url="${ROOT_URL}" local/temp/${FORMULA_NAME}
+
+          BOTTLE_FILE=$(ls ${FORMULA_NAME}--*.bottle.tar.gz)
+          BOTTLE_JSON=$(ls ${FORMULA_NAME}--*.bottle.json)
+
+          echo "bottle_file=${BOTTLE_FILE}" >> $GITHUB_OUTPUT
+          echo "bottle_json=${BOTTLE_JSON}" >> $GITHUB_OUTPUT
+
+          # Extract SHA256 from JSON - the key might be the formula name or have version suffix
+          SHA256=$(python3 -c "import json; data = json.load(open('${BOTTLE_JSON}')); key = list(data.keys())[0]; print(data[key]['bottle']['tags']['arm64_sonoma']['sha256'])")
+          echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+
+          SIZE=$(du -h "${BOTTLE_FILE}" | cut -f1)
+          echo "size=${SIZE}" >> $GITHUB_OUTPUT
+
+          echo "✅ Built bottle: ${BOTTLE_FILE} (${SIZE})"
+          echo "SHA256: ${SHA256}"
+
+      - name: Upload bottle as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bottle-arm64_sonoma
+          path: |
+            ${{ steps.bottle.outputs.bottle_file }}
+            ${{ steps.bottle.outputs.bottle_json }}
+          retention-days: 30
+
+      - name: Save bottle metadata
+        run: |
+          cat > bottle-info-arm64_sonoma.json << EOF
+          {
+            "platform": "arm64_sonoma",
+            "sha256": "${{ steps.bottle.outputs.sha256 }}",
+            "filename": "${{ steps.bottle.outputs.bottle_file }}",
+            "size": "${{ steps.bottle.outputs.size }}"
+          }
+          EOF
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-arm64_sonoma
+          path: bottle-info-arm64_sonoma.json
+          retention-days: 30
+
+      - name: Create summary
+        env:
+          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+        run: |
+          {
+            echo "# 🍾 Bottle Built: ${FORMULA_NAME}"
+            echo ""
+            echo "**Version:** ${{ inputs.version }}"
+            echo "**Build repo ref:** ${{ inputs.build_repo_ref }}"
+            echo "**Musl source:** ${{ inputs.musl_git_url }}"
+            echo "**Platform:** arm64_sonoma"
+            echo ""
+            echo "Bottle has been uploaded as a workflow artifact."
+            echo "Run the 'Publish Bottles' workflow to publish it to a release."
+          } >> $GITHUB_STEP_SUMMARY

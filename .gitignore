@@ -1,0 +1,4 @@
+*.bottle.tar.gz
+*.bottle.json
+bottle-*/
+metadata-*/
