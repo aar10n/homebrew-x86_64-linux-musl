@@ -1,13 +1,13 @@
-class X8664LinuxMusl < Formula
+class X86_64LinuxMuslToolchainAT12 < Formula
   desc "Cross-compilation toolchain for x86_64-linux-musl target"
   homepage "https://github.com/aar10n/x86_64-linux-musl"
-  url "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/12.1.0"
-  sha256 "5a02b02d1ff21a7086c9efc27d1c5782e3480c9b68285a421b0e492b522e7f56"
+  url "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/12.1.0.tar.gz"
+  sha256 "13c89a89170e59b39fe4bbcbe1891cec2701624602bd1b3b4445acf4d511e6c9"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/aar10n/x86_64-linux-musl/releases/download/12.1.0"
-    sha256 cellar: :any, arm64_sonoma: "ab7cc1777cc2f17707f50e20bbab176e67dd9efba0418e19b43e59c1287904e9"
+    root_url "https://github.com/aar10n/homebrew-x86_64-linux-musl/releases/download/12.1.0"
+    sha256 cellar: :any, arm64_sonoma: "de3a1624f8825c0af501224e53f0a50542074c662bc0b357eca677183e50a6c6"
   end
 
   depends_on "wget" => :build
@@ -57,7 +57,14 @@ class X8664LinuxMusl < Formula
     (buildpath/"local.mk").write local_mk
 
     # Build the toolchain using make directly
-    system "make", "autoconf", "binutils", "gcc", "musl", "libtool"
+    system "make", "autoconf", "binutils", "gcc", "musl"
+
+    # Remove unprefixed autoconf binaries to avoid conflicts
+    # autoconf is built as a prerequisite but shouldn't be in the final installation
+    Dir.glob(prefix/"bin/autoconf*").each { |f| File.delete(f) }
+    Dir.glob(prefix/"bin/autom4te*").each { |f| File.delete(f) }
+    Dir.glob(prefix/"bin/auto{header,reconf,scan,update}").each { |f| File.delete(f) if File.exist?(f) }
+    Dir.glob(prefix/"bin/ifnames").each { |f| File.delete(f) if File.exist?(f) }
 
     # Verify installation
     raise "Toolchain installation failed" unless (prefix/"bin/x86_64-linux-musl-gcc").exist?
@@ -85,23 +92,15 @@ class X8664LinuxMusl < Formula
         #{opt_prefix}
 
       Add the toolchain to your PATH:
-        export PATH="#{opt_prefix}/bin:$PATH"
+        export PATH="#{opt_prefix}/bin:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
 
       Or use the cross-compilation prefix directly:
         x86_64-linux-musl-gcc hello.c -o hello
 
       The toolchain includes:
         - binutils 2.38 (assembler, linker, etc.)
-        - GCC 12.1.0 (C and C++ support)
-        - musl libc (official musl-libc.org source)
-        - Additional build tools (autoconf, libtool)
-
-      To compile static binaries:
-        x86_64-linux-musl-gcc -static myprogram.c -o myprogram
-
-      To see toolchain info:
-        x86_64-linux-musl-gcc --version
-        x86_64-linux-musl-ld --version
+        - GCC (C and C++ support)
+        - musl libc
     EOS
   end
 end

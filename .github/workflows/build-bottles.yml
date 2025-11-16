@@ -4,14 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag for bottles (e.g., v1.0.0)"
+        description: "Version tag (e.g., 12.1.0 or 13.4.2-osdev)"
         required: true
         type: string
-      build_repo_ref:
-        description: "x86_64-linux-musl repo ref (branch/tag/commit)"
-        required: false
-        type: string
-        default: "main"
       musl_git_url:
         description: "Musl git repository URL"
         required: false
@@ -24,7 +19,7 @@ on:
         default: "master"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-bottles:
@@ -34,36 +29,38 @@ jobs:
     steps:
       - name: Checkout tap repository
         uses: actions/checkout@v4
-        with:
-          path: tap
 
-      - name: Checkout build repository
-        uses: actions/checkout@v4
-        with:
-          repository: aar10n/x86_64-linux-musl
-          ref: ${{ inputs.build_repo_ref }}
-          path: x86_64-linux-musl
-
-      - name: Determine formula from musl URL
-        id: determine
+      - name: Determine build parameters
+        id: prepare
         env:
+          VERSION_TAG: ${{ inputs.version }}
           MUSL_URL: ${{ inputs.musl_git_url }}
         run: |
-          # Check if using osdev-musl
+          # Extract GCC major version (first number)
+          GCC_MAJOR=$(echo "$VERSION_TAG" | grep -oE '^[0-9]+' | head -1)
+
+          # Check for variant suffix
           if [[ "$MUSL_URL" == *"osdev-musl"* ]]; then
-            echo "formula_name=x86_64-linux-musl-osdev" >> $GITHUB_OUTPUT
-            echo "Building x86_64-linux-musl-osdev (osdev-musl variant)"
+            VARIANT_SUFFIX="-osdev"
+            VERSIONED_FORMULA="x86_64-linux-musl-toolchain-osdev@${GCC_MAJOR}"
           else
-            echo "formula_name=x86_64-linux-musl" >> $GITHUB_OUTPUT
-            echo "Building x86_64-linux-musl (official musl)"
+            VARIANT_SUFFIX=""
+            VERSIONED_FORMULA="x86_64-linux-musl-toolchain@${GCC_MAJOR}"
           fi
+
+          echo "versioned_formula=${VERSIONED_FORMULA}" >> $GITHUB_OUTPUT
+          echo "variant_suffix=${VARIANT_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "gcc_major=${GCC_MAJOR}" >> $GITHUB_OUTPUT
+
+          echo "Formula: ${VERSIONED_FORMULA}"
+          echo "Variant: ${VARIANT_SUFFIX:-official musl}"
 
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@master
 
       - name: Install build dependencies
         run: |
-          brew install gcc@14 wget coreutils texinfo || true
+          brew install gcc@14 wget coreutils texinfo gettext || true
 
           # Retry texinfo post-install if it failed
           brew postinstall texinfo 2>/dev/null || true
@@ -75,42 +72,56 @@ jobs:
           which makeinfo
           makeinfo --version
 
-      - name: Create local source tarball
-        run: |
-          tar czf x86_64-linux-musl-${GITHUB_SHA:0:7}.tar.gz x86_64-linux-musl
-
-      - name: Create temporary formula for CI build
+      - name: Create versioned formula for building
         env:
-          MUSL_URL: ${{ inputs.musl_git_url }}
-          MUSL_BRANCH: ${{ inputs.musl_git_branch }}
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSION_TAG: ${{ inputs.version }}
+          VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
+          VARIANT_SUFFIX: ${{ steps.prepare.outputs.variant_suffix }}
+          GCC_MAJOR: ${{ steps.prepare.outputs.gcc_major }}
         run: |
-          # Copy the real formula from tap repo
-          cp tap/Formula/${FORMULA_NAME}.rb ci-formula.rb
+          # Download source tarball to calculate SHA256
+          wget -q "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/${VERSION_TAG}.tar.gz"
+          export SOURCE_SHA256=$(shasum -a 256 "${VERSION_TAG}.tar.gz" | awk '{print $1}')
+          rm "${VERSION_TAG}.tar.gz"
 
-          # Replace URL with local tarball for CI
-          TARBALL_PATH="file://$(pwd)/x86_64-linux-musl-${GITHUB_SHA:0:7}.tar.gz"
-          sed -i.bak "s|https://github.com/.*/archive/refs/tags/.*\.tar\.gz|${TARBALL_PATH}|" ci-formula.rb
+          # Convert formula class name to match Homebrew's conventions
+          # x86_64-linux-musl-toolchain@12 -> X8664LinuxMuslToolchainAT12
+          # x86_64-linux-musl-toolchain-osdev@12 -> X8664LinuxMuslToolchainOsdevAT12
+          # @ becomes AT in the class name
+          if [[ "$VARIANT_SUFFIX" == "-osdev" ]]; then
+            export FORMULA_CLASS="X8664LinuxMuslToolchainOsdevAT${GCC_MAJOR}"
+          else
+            export FORMULA_CLASS="X8664LinuxMuslToolchainAT${GCC_MAJOR}"
+          fi
 
-          # Update musl URL if needed
-          sed -i.bak "s|MUSL_GIT_URL = .*|MUSL_GIT_URL = ${MUSL_URL}|" ci-formula.rb
-          sed -i.bak "s|MUSL_GIT_BRANCH = .*|MUSL_GIT_BRANCH = ${MUSL_BRANCH}|" ci-formula.rb
+          # Set musl configuration based on variant
+          if [[ "$VARIANT_SUFFIX" == "-osdev" ]]; then
+            export MUSL_CONFIG=$'      MUSL_GIT_URL = https://github.com/aar10n/osdev-musl.git\n      MUSL_GIT_BRANCH = master'
+          else
+            export MUSL_CONFIG=$'      MUSL_GIT_URL = git://git.musl-libc.org/musl\n      MUSL_GIT_BRANCH = master'
+          fi
 
-          rm -f ci-formula.rb.bak
+          # Bottle SHA will be calculated later, use placeholder for now
+          export BOTTLE_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
 
-      - name: Create temporary tap
-        env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
-        run: |
-          mkdir -p $(brew --repository)/Library/Taps/local/homebrew-temp
-          mkdir -p $(brew --repository)/Library/Taps/local/homebrew-temp/Formula
-          cp ci-formula.rb $(brew --repository)/Library/Taps/local/homebrew-temp/Formula/${FORMULA_NAME}.rb
+          # Create versioned formula from template
+          VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
+          envsubst < formula-template.rb > "$VERSIONED_FILE"
+
+          echo "Created versioned formula: $VERSIONED_FILE"
+          cat "$VERSIONED_FILE" | head -15
+
+          # Commit the formula so it's in the repo for tapping
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$VERSIONED_FILE"
+          git commit -m "temp: add ${VERSIONED_FORMULA} for bottle building"
 
       - name: Build toolchain in bottle mode
         id: build
         continue-on-error: true
         env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
           HOMEBREW_NO_AUTO_UPDATE: 1
           HOMEBREW_MAKE_JOBS: 1
@@ -119,15 +130,21 @@ jobs:
           export PATH="$(brew --prefix texinfo)/bin:$PATH"
           export PATH="$(brew --prefix bison)/bin:$PATH"
 
-          brew install --build-bottle --verbose local/temp/${FORMULA_NAME}
+          # setup-homebrew already created a symlink for our tap, so we can use it directly
+          # List all formulas in the tap to verify
+          brew search aar10n/x86_64-linux-musl/ || true
+          ls -la "/opt/homebrew/Library/Taps/aar10n/homebrew-x86_64-linux-musl/Formula/"
+
+          # Now build the bottle (use full tap/formula syntax)
+          brew install --build-bottle --verbose "aar10n/x86_64-linux-musl/${VERSIONED_FORMULA}"
 
       - name: Display build logs on failure
         if: steps.build.outcome == 'failure'
         env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
         run: |
           echo "=== Build failed. Displaying full logs ==="
-          LOG_FILE=$(ls -t ~/Library/Logs/Homebrew/${FORMULA_NAME}/*.log 2>/dev/null | head -1)
+          LOG_FILE=$(ls -t ~/Library/Logs/Homebrew/${VERSIONED_FORMULA}/*.log 2>/dev/null | head -1)
           if [ -n "$LOG_FILE" ]; then
             echo "Full log from: $LOG_FILE"
             cat "$LOG_FILE"
@@ -138,13 +155,13 @@ jobs:
 
       - name: Run tests
         env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
         run: |
           # Formula tests use full paths, so this should work
-          brew test local/temp/${FORMULA_NAME}
+          brew test ${VERSIONED_FORMULA}
 
           # For additional tests, add keg to PATH since it's keg-only
-          export PATH="$(brew --prefix local/temp/${FORMULA_NAME})/bin:$PATH"
+          export PATH="$(brew --prefix ${VERSIONED_FORMULA})/bin:$PATH"
 
           x86_64-linux-musl-gcc --version
           echo "int main() { return 0; }" | x86_64-linux-musl-gcc -x c -static - -o test
@@ -154,13 +171,13 @@ jobs:
       - name: Create bottle
         id: bottle
         env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
         run: |
           ROOT_URL="https://github.com/${{ github.repository }}/releases/download/${{ inputs.version }}"
-          brew bottle --json --root-url="${ROOT_URL}" local/temp/${FORMULA_NAME}
+          brew bottle --json --root-url="${ROOT_URL}" ${VERSIONED_FORMULA}
 
-          BOTTLE_FILE=$(ls ${FORMULA_NAME}--*.bottle.tar.gz)
-          BOTTLE_JSON=$(ls ${FORMULA_NAME}--*.bottle.json)
+          BOTTLE_FILE=$(ls ${VERSIONED_FORMULA}--*.bottle*.tar.gz)
+          BOTTLE_JSON=$(ls ${VERSIONED_FORMULA}--*.bottle.json)
 
           echo "bottle_file=${BOTTLE_FILE}" >> $GITHUB_OUTPUT
           echo "bottle_json=${BOTTLE_JSON}" >> $GITHUB_OUTPUT
@@ -204,13 +221,14 @@ jobs:
 
       - name: Create summary
         env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
+          VARIANT_SUFFIX: ${{ steps.prepare.outputs.variant_suffix }}
         run: |
           {
-            echo "# 🍾 Bottle Built: ${FORMULA_NAME}"
+            echo "# 🍾 Bottle Built"
             echo ""
             echo "**Version:** ${{ inputs.version }}"
-            echo "**Build repo ref:** ${{ inputs.build_repo_ref }}"
+            echo "**Variant:** ${VARIANT_SUFFIX:-official musl}"
             echo "**Musl source:** ${{ inputs.musl_git_url }}"
             echo "**Platform:** arm64_sonoma"
             echo ""

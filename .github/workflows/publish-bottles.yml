@@ -4,13 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version tag (e.g., v1.0.0 or v1.0.0-osdev)"
+        description: "Release version tag (e.g., 12.1.0 or 13.4.2-osdev)"
         required: true
         type: string
       run_id:
         description: "Workflow run ID from Build Bottles workflow (leave empty to use latest)"
         required: false
         type: string
+      is_default:
+        description: "Make this the default formula (x86_64-linux-musl-toolchain)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,18 +31,39 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine formula from version tag
+      - name: Determine formula names from version tag
         id: determine
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          # Check version tag (e.g., v1.0.0-osdev)
+          # Parse version to extract GCC major version and variant
+          # Examples: 12.1.0 -> gcc12, 13.4.2-osdev -> gcc13-osdev
+
+          # Extract GCC major version (first number)
+          GCC_MAJOR=$(echo "$VERSION" | grep -oE '^[0-9]+' | head -1)
+
+          # Check for variant suffix
           if [[ "$VERSION" == *"-osdev" ]]; then
-            echo "formula_name=x86_64-linux-musl-osdev" >> $GITHUB_OUTPUT
-            echo "Detected osdev variant from version tag: ${VERSION}"
+            VARIANT_SUFFIX="-osdev"
+            VERSIONED_NAME="x86_64-linux-musl-toolchain-osdev@${GCC_MAJOR}"
+            BASE_FORMULA="x86_64-linux-musl-osdev"  # For finding old formula
           else
-            echo "formula_name=x86_64-linux-musl" >> $GITHUB_OUTPUT
-            echo "Using official musl variant for version: ${VERSION}"
+            VARIANT_SUFFIX=""
+            VERSIONED_NAME="x86_64-linux-musl-toolchain@${GCC_MAJOR}"
+            BASE_FORMULA="x86_64-linux-musl"  # For finding old formula
+          fi
+
+          DEFAULT_NAME="x86_64-linux-musl-toolchain"
+
+          echo "versioned_formula=${VERSIONED_NAME}" >> $GITHUB_OUTPUT
+          echo "default_formula=${DEFAULT_NAME}" >> $GITHUB_OUTPUT
+          echo "base_formula=${BASE_FORMULA}" >> $GITHUB_OUTPUT
+          echo "gcc_major=${GCC_MAJOR}" >> $GITHUB_OUTPUT
+          echo "variant_suffix=${VARIANT_SUFFIX}" >> $GITHUB_OUTPUT
+
+          echo "Creating versioned formula: ${VERSIONED_NAME}"
+          if [[ "${{ inputs.is_default }}" == "true" ]]; then
+            echo "Will also create default formula: ${DEFAULT_NAME}"
           fi
 
       - name: Download bottles from workflow run
@@ -64,7 +90,8 @@ jobs:
       - name: Calculate source tarball SHA256
         id: source_sha
         run: |
-          wget -q "https://github.com/${{ github.repository }}/archive/refs/tags/${{ inputs.version }}.tar.gz"
+          # Download source tarball from the x86_64-linux-musl repo (not the tap repo)
+          wget -q "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/${{ inputs.version }}.tar.gz"
           SOURCE_SHA=$(shasum -a 256 "${{ inputs.version }}.tar.gz" | awk '{print $1}')
           echo "sha256=${SOURCE_SHA}" >> $GITHUB_OUTPUT
           rm "${{ inputs.version }}.tar.gz"
@@ -102,66 +129,158 @@ jobs:
           fi
 
       - name: Upload bottles to release
+        id: upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
+          DEFAULT_FORMULA: ${{ steps.determine.outputs.default_formula }}
+          IS_DEFAULT: ${{ inputs.is_default }}
         run: |
           # Find all bottle files (they're in subdirectories from artifact download)
-          for bottle in */*.bottle.tar.gz; do
+          # Note: bottle files may have revision numbers like .bottle.1.tar.gz
+          for bottle in */*.bottle*.tar.gz; do
             if [ -f "$bottle" ]; then
-              echo "Uploading ${bottle}..."
-              gh release upload "${{ inputs.version }}" "${bottle}" \
+              # Normalize the filename to what Homebrew expects:
+              # - Remove double dashes (formula--version -> formula-version)
+              # - Remove revision numbers (.bottle.1.tar.gz -> .bottle.tar.gz)
+              normalized=$(basename "$bottle" | sed 's/--/-/g' | sed 's/\.bottle\.[0-9]*\.tar\.gz/.bottle.tar.gz/')
+
+              # Extract the formula name from the bottle (everything before the version number)
+              # Example: x86_64-linux-musl-toolchain-gcc12-12.1.0.arm64... -> x86_64-linux-musl-toolchain-gcc12
+              original_formula=$(echo "$normalized" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+.*//')
+
+              # Upload as versioned formula name
+              versioned_name=$(echo "$normalized" | sed "s/^${original_formula}/${VERSIONED_FORMULA}/")
+              echo "Uploading ${bottle} as ${versioned_name}..."
+              cp "$bottle" "$versioned_name"
+              gh release upload "${{ inputs.version }}" "$versioned_name" \
                 --repo "${{ github.repository }}" --clobber
+              rm "$versioned_name"
+
+              # Also create and upload repackaged bottle for default formula if this is the default version
+              if [[ "$IS_DEFAULT" == "true" ]]; then
+                default_name=$(echo "$normalized" | sed "s/^${original_formula}/${DEFAULT_FORMULA}/")
+                echo "Creating repackaged bottle for default formula: ${default_name}..."
+
+                # Extract the bottle
+                mkdir -p repackage
+                tar -xzf "$bottle" -C repackage
+
+                # The bottle contains a directory named after the versioned formula
+                # We need to rename it to the default formula name
+                cd repackage
+                if [ -d "${VERSIONED_FORMULA}" ]; then
+                  mv "${VERSIONED_FORMULA}" "${DEFAULT_FORMULA}"
+                fi
+
+                # Repackage with the new directory name
+                tar -czf "../${default_name}" *
+                cd ..
+
+                # Calculate SHA256 of the repackaged bottle
+                DEFAULT_BOTTLE_SHA256=$(shasum -a 256 "${default_name}" | awk '{print $1}')
+                echo "default_bottle_sha256=${DEFAULT_BOTTLE_SHA256}" >> $GITHUB_OUTPUT
+                echo "Repackaged bottle SHA256: ${DEFAULT_BOTTLE_SHA256}"
+
+                # Upload the repackaged bottle
+                echo "Uploading repackaged bottle as ${default_name} (default)..."
+                gh release upload "${{ inputs.version }}" "${default_name}" \
+                  --repo "${{ github.repository }}" --clobber
+
+                # Cleanup
+                rm -rf repackage
+                rm "${default_name}"
+              fi
             fi
           done
 
-      - name: Update formula with new version and bottle
-        env:
-          VERSION: ${{ inputs.version }}
-          SOURCE_SHA: ${{ steps.source_sha.outputs.sha256 }}
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+      - name: Install envsubst
         run: |
-          FORMULA_FILE="Formula/${FORMULA_NAME}.rb"
+          sudo apt-get update
+          sudo apt-get install -y gettext-base
 
-          # Extract bottle SHA256 from metadata (it's in a subdirectory)
-          BOTTLE_SHA=$(jq -r '.sha256' */bottle-info-arm64_sonoma.json)
+      - name: Create versioned formula
+        env:
+          VERSION_TAG: ${{ inputs.version }}
+          SOURCE_SHA256: ${{ steps.source_sha.outputs.sha256 }}
+          VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
+          VARIANT_SUFFIX: ${{ steps.determine.outputs.variant_suffix }}
+        run: |
+          # Extract bottle SHA256 from metadata
+          export BOTTLE_SHA256=$(jq -r '.sha256' */bottle-info-arm64_sonoma.json)
 
-          echo "Updating formula with:"
-          echo "  VERSION: ${VERSION}"
-          echo "  SOURCE_SHA: ${SOURCE_SHA}"
-          echo "  BOTTLE_SHA: ${BOTTLE_SHA}"
-          echo ""
-          echo "Formula before updates:"
-          head -11 "$FORMULA_FILE"
-          echo ""
+          # Convert formula class name
+          # x86_64-linux-musl-toolchain@12 -> X8664LinuxMuslToolchainAT12
+          # x86_64-linux-musl-toolchain-osdev@12 -> X8664LinuxMuslToolchainOsdevAT12
+          # Replace @ with AT, remove underscores, capitalize each word after hyphen, capitalize first letter
+          export FORMULA_CLASS=$(echo "$VERSIONED_FORMULA" | sed 's/@/AT/g; s/_//g; s/-\([a-z]\)/\U\1/g; s/^./\U&/')
 
-          # Update version in URL
-          sed -i "s|archive/refs/tags/[^\"]*|archive/refs/tags/${VERSION}|g" "$FORMULA_FILE"
+          # Set musl configuration based on variant
+          if [[ "$VARIANT_SUFFIX" == "-osdev" ]]; then
+            export MUSL_CONFIG=$'      MUSL_GIT_URL = https://github.com/aar10n/osdev-musl.git\n      MUSL_GIT_BRANCH = master'
+          else
+            export MUSL_CONFIG=$'      MUSL_GIT_URL = git://git.musl-libc.org/musl\n      MUSL_GIT_BRANCH = master'
+          fi
 
-          # Update source SHA256 (first occurrence only)
-          sed -i "0,/sha256 \"[0-9a-f]*\"/{s|sha256 \"[0-9a-f]*\"|sha256 \"${SOURCE_SHA}\"|}" "$FORMULA_FILE"
+          # Create versioned formula from template
+          VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
+          envsubst < formula-template.rb > "$VERSIONED_FILE"
 
-          # Update bottle root_url
-          sed -i "s|releases/download/[^\"]*\"|releases/download/${VERSION}\"|g" "$FORMULA_FILE"
+          echo "Created versioned formula: $VERSIONED_FILE"
+          echo "Formula contents:"
+          head -11 "$VERSIONED_FILE"
 
-          # Update bottle SHA256
-          sed -i "s|sha256 cellar: :any, arm64_sonoma: \"[0-9a-f]*\"|sha256 cellar: :any, arm64_sonoma: \"${BOTTLE_SHA}\"|" "$FORMULA_FILE"
+      - name: Create default formula
+        if: inputs.is_default == true
+        env:
+          VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
+          DEFAULT_FORMULA: ${{ steps.determine.outputs.default_formula }}
+          DEFAULT_BOTTLE_SHA256: ${{ steps.upload.outputs.default_bottle_sha256 }}
+        run: |
+          DEFAULT_FILE="Formula/${DEFAULT_FORMULA}.rb"
+          VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
 
-          echo "Formula after updates:"
-          head -11 "$FORMULA_FILE"
+          # Remove existing default if it exists
+          if [ -f "$DEFAULT_FILE" ] || [ -L "$DEFAULT_FILE" ]; then
+            rm "$DEFAULT_FILE"
+          fi
+
+          # Extract the actual class name from the versioned formula file
+          VERSIONED_CLASS=$(grep "^class " "$VERSIONED_FILE" | sed 's/class \([^ ]*\).*/\1/')
+
+          # Extract the versioned bottle SHA256 to replace it
+          VERSIONED_BOTTLE_SHA256=$(grep "sha256 cellar:" "$VERSIONED_FILE" | sed -n 's/.*arm64_sonoma: "\([^"]*\)".*/\1/p')
+
+          # Convert default formula name to class name
+          DEFAULT_CLASS=$(echo "$DEFAULT_FORMULA" | sed 's/@/AT/g; s/-/_/g' | awk -F'_' '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)} 1' OFS='')
+
+          # Copy versioned formula, update class name and bottle SHA256
+          sed "s/class ${VERSIONED_CLASS}/class ${DEFAULT_CLASS}/" "$VERSIONED_FILE" | \
+            sed "s/${VERSIONED_BOTTLE_SHA256}/${DEFAULT_BOTTLE_SHA256}/" > "$DEFAULT_FILE"
+
+          echo "Created default formula: $DEFAULT_FILE (class ${DEFAULT_CLASS})"
+          echo "Updated bottle SHA256 from ${VERSIONED_BOTTLE_SHA256} to ${DEFAULT_BOTTLE_SHA256}"
+          head -n 11 "$DEFAULT_FILE"
 
       - name: Commit formula updates
         env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
+          DEFAULT_FORMULA: ${{ steps.determine.outputs.default_formula }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/${FORMULA_NAME}.rb
+
+          git add Formula/
 
           # Only commit if there are changes
           if git diff --staged --quiet; then
-            echo "No changes to formula, skipping commit"
+            echo "No changes to formulas, skipping commit"
           else
-            git commit -m "Update ${FORMULA_NAME} to ${{ inputs.version }} with bottle"
+            COMMIT_MSG="Add ${VERSIONED_FORMULA} for version ${{ inputs.version }}"
+            if [[ "${{ inputs.is_default }}" == "true" ]]; then
+              COMMIT_MSG="${COMMIT_MSG} (default)"
+            fi
+            git commit -m "$COMMIT_MSG"
             git push
           fi
 
@@ -176,18 +295,29 @@ jobs:
 
       - name: Create summary
         env:
-          FORMULA_NAME: ${{ steps.determine.outputs.formula_name }}
+          VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
+          DEFAULT_FORMULA: ${{ steps.determine.outputs.default_formula }}
         run: |
           {
-            echo "# 🍾 Bottles Published: ${FORMULA_NAME}"
+            echo "# 🍾 Bottle Published"
             echo ""
             echo "**Version:** ${{ inputs.version }}"
+            echo "**Formula:** ${VERSIONED_FORMULA}"
+            if [[ "${{ inputs.is_default }}" == "true" ]]; then
+              echo "**Default:** Yes (${DEFAULT_FORMULA})"
+            fi
             echo ""
             echo "## Installation"
             echo '```bash'
             echo "brew tap ${{ github.repository }}"
-            echo "brew install ${FORMULA_NAME}"
+            if [[ "${{ inputs.is_default }}" == "true" ]]; then
+              echo "# Install default version:"
+              echo "brew install ${DEFAULT_FORMULA}"
+              echo ""
+              echo "# Or install specific version:"
+            fi
+            echo "brew install ${VERSIONED_FORMULA}"
             echo '```'
             echo ""
-            echo "Formula has been updated in the repository."
+            echo "Formula has been added to the repository."
           } >> $GITHUB_STEP_SUMMARY
