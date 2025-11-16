@@ -1,4 +1,4 @@
-class X86_64LinuxMuslToolchainAT12 < Formula
+class X8664LinuxMuslToolchainAT12 < Formula
   desc "Cross-compilation toolchain for x86_64-linux-musl target"
   homepage "https://github.com/aar10n/x86_64-linux-musl"
   url "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/12.1.0.tar.gz"
