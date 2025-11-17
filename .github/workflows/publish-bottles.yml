@@ -215,13 +215,6 @@ jobs:
           # Replace @ with AT, remove underscores, capitalize each word after hyphen, capitalize first letter
           export FORMULA_CLASS=$(echo "$VERSIONED_FORMULA" | sed 's/@/AT/g; s/_//g; s/-\([a-z]\)/\U\1/g; s/^./\U&/')
 
-          # Set musl configuration based on variant
-          if [[ "$VARIANT_SUFFIX" == "-osdev" ]]; then
-            export MUSL_CONFIG=$'      MUSL_GIT_URL = https://github.com/aar10n/osdev-musl.git\n      MUSL_GIT_BRANCH = master'
-          else
-            export MUSL_CONFIG=$'      MUSL_GIT_URL = git://git.musl-libc.org/musl\n      MUSL_GIT_BRANCH = master'
-          fi
-
           # Create versioned formula from template
           VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
           envsubst < formula-template.rb > "$VERSIONED_FILE"
