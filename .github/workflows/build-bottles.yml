@@ -7,16 +7,6 @@ on:
         description: "Version tag (e.g., 12.1.0 or 13.4.2-osdev)"
         required: true
         type: string
-      musl_git_url:
-        description: "Musl git repository URL"
-        required: false
-        type: string
-        default: "git://git.musl-libc.org/musl"
-      musl_git_branch:
-        description: "Musl git branch"
-        required: false
-        type: string
-        default: "master"
 
 permissions:
   contents: write
@@ -34,13 +24,12 @@ jobs:
         id: prepare
         env:
           VERSION_TAG: ${{ inputs.version }}
-          MUSL_URL: ${{ inputs.musl_git_url }}
         run: |
           # Extract GCC major version (first number)
           GCC_MAJOR=$(echo "$VERSION_TAG" | grep -oE '^[0-9]+' | head -1)
 
-          # Check for variant suffix
-          if [[ "$MUSL_URL" == *"osdev-musl"* ]]; then
+          # Check for variant suffix in version tag
+          if [[ "$VERSION_TAG" == *"-osdev" ]]; then
             VARIANT_SUFFIX="-osdev"
             VERSIONED_FORMULA="x86_64-linux-musl-toolchain-osdev@${GCC_MAJOR}"
           else
@@ -92,13 +81,6 @@ jobs:
             export FORMULA_CLASS="X8664LinuxMuslToolchainOsdevAT${GCC_MAJOR}"
           else
             export FORMULA_CLASS="X8664LinuxMuslToolchainAT${GCC_MAJOR}"
-          fi
-
-          # Set musl configuration based on variant
-          if [[ "$VARIANT_SUFFIX" == "-osdev" ]]; then
-            export MUSL_CONFIG=$'      MUSL_GIT_URL = https://github.com/aar10n/osdev-musl.git\n      MUSL_GIT_BRANCH = master'
-          else
-            export MUSL_CONFIG=$'      MUSL_GIT_URL = git://git.musl-libc.org/musl\n      MUSL_GIT_BRANCH = master'
           fi
 
           # Bottle SHA will be calculated later, use placeholder for now
@@ -229,7 +211,6 @@ jobs:
             echo ""
             echo "**Version:** ${{ inputs.version }}"
             echo "**Variant:** ${VARIANT_SUFFIX:-official musl}"
-            echo "**Musl source:** ${{ inputs.musl_git_url }}"
             echo "**Platform:** arm64_sonoma"
             echo ""
             echo "Bottle has been uploaded as a workflow artifact."

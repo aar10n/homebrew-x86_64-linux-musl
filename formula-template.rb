@@ -37,11 +37,10 @@ class ${FORMULA_CLASS} < Formula
       opoo "No GCC found. Attempting to use system compiler."
     end
 
-    # Set up local.mk to override installation directory and musl source
+    # Set up local.mk to override installation directory
     local_mk = <<~EOS
       TOOL_ROOT = #{prefix}
       BUILD_DIR = #{buildpath}/build
-${MUSL_CONFIG}
     EOS
 
     if real_gcc
