@@ -46,14 +46,14 @@ jobs:
           if [[ "$VERSION" == *"-osdev" ]]; then
             VARIANT_SUFFIX="-osdev"
             VERSIONED_NAME="x86_64-linux-musl-toolchain-osdev@${GCC_MAJOR}"
+            DEFAULT_NAME="x86_64-linux-musl-toolchain-osdev"
             BASE_FORMULA="x86_64-linux-musl-osdev"  # For finding old formula
           else
             VARIANT_SUFFIX=""
             VERSIONED_NAME="x86_64-linux-musl-toolchain@${GCC_MAJOR}"
+            DEFAULT_NAME="x86_64-linux-musl-toolchain"
             BASE_FORMULA="x86_64-linux-musl"  # For finding old formula
           fi
-
-          DEFAULT_NAME="x86_64-linux-musl-toolchain"
 
           echo "versioned_formula=${VERSIONED_NAME}" >> $GITHUB_OUTPUT
           echo "default_formula=${DEFAULT_NAME}" >> $GITHUB_OUTPUT
@@ -129,12 +129,9 @@ jobs:
           fi
 
       - name: Upload bottles to release
-        id: upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
-          DEFAULT_FORMULA: ${{ steps.determine.outputs.default_formula }}
-          IS_DEFAULT: ${{ inputs.is_default }}
         run: |
           # Find all bottle files (they're in subdirectories from artifact download)
           # Note: bottle files may have revision numbers like .bottle.1.tar.gz
@@ -156,41 +153,6 @@ jobs:
               gh release upload "${{ inputs.version }}" "$versioned_name" \
                 --repo "${{ github.repository }}" --clobber
               rm "$versioned_name"
-
-              # Also create and upload repackaged bottle for default formula if this is the default version
-              if [[ "$IS_DEFAULT" == "true" ]]; then
-                default_name=$(echo "$normalized" | sed "s/^${original_formula}/${DEFAULT_FORMULA}/")
-                echo "Creating repackaged bottle for default formula: ${default_name}..."
-
-                # Extract the bottle
-                mkdir -p repackage
-                tar -xzf "$bottle" -C repackage
-
-                # The bottle contains a directory named after the versioned formula
-                # We need to rename it to the default formula name
-                cd repackage
-                if [ -d "${VERSIONED_FORMULA}" ]; then
-                  mv "${VERSIONED_FORMULA}" "${DEFAULT_FORMULA}"
-                fi
-
-                # Repackage with the new directory name
-                tar -czf "../${default_name}" *
-                cd ..
-
-                # Calculate SHA256 of the repackaged bottle
-                DEFAULT_BOTTLE_SHA256=$(shasum -a 256 "${default_name}" | awk '{print $1}')
-                echo "default_bottle_sha256=${DEFAULT_BOTTLE_SHA256}" >> $GITHUB_OUTPUT
-                echo "Repackaged bottle SHA256: ${DEFAULT_BOTTLE_SHA256}"
-
-                # Upload the repackaged bottle
-                echo "Uploading repackaged bottle as ${default_name} (default)..."
-                gh release upload "${{ inputs.version }}" "${default_name}" \
-                  --repo "${{ github.repository }}" --clobber
-
-                # Cleanup
-                rm -rf repackage
-                rm "${default_name}"
-              fi
             fi
           done
 
@@ -217,7 +179,7 @@ jobs:
 
           # Create versioned formula from template
           VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
-          envsubst '$FORMULA_CLASS $VERSION_TAG $SOURCE_SHA256 $BOTTLE_SHA256' < formula-template.rb > "$VERSIONED_FILE"
+          envsubst '$FORMULA_CLASS $VERSION_TAG $SOURCE_SHA256 $BOTTLE_SHA256' < formula-versioned.rb > "$VERSIONED_FILE"
 
           echo "Created versioned formula: $VERSIONED_FILE"
           echo "Formula contents:"
@@ -226,34 +188,28 @@ jobs:
       - name: Create default formula
         if: inputs.is_default == true
         env:
+          VERSION_TAG: ${{ inputs.version }}
           VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
           DEFAULT_FORMULA: ${{ steps.determine.outputs.default_formula }}
-          DEFAULT_BOTTLE_SHA256: ${{ steps.upload.outputs.default_bottle_sha256 }}
+          VARIANT_SUFFIX: ${{ steps.determine.outputs.variant_suffix }}
         run: |
-          DEFAULT_FILE="Formula/${DEFAULT_FORMULA}.rb"
-          VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
+          # Convert default formula name to class name
+          export FORMULA_CLASS=$(echo "$DEFAULT_FORMULA" | sed 's/@/AT/g; s/_//g; s/-\([a-z]\)/\U\1/g; s/^./\U&/')
 
-          # Remove existing default if it exists
-          if [ -f "$DEFAULT_FILE" ] || [ -L "$DEFAULT_FILE" ]; then
-            rm "$DEFAULT_FILE"
+          # Set description based on variant
+          if [[ "$VARIANT_SUFFIX" == "-osdev" ]]; then
+            export FORMULA_DESC="Cross-compilation toolchain for x86_64-linux-musl target (osdev variant)"
+          else
+            export FORMULA_DESC="Cross-compilation toolchain for x86_64-linux-musl target"
           fi
 
-          # Extract the actual class name from the versioned formula file
-          VERSIONED_CLASS=$(grep "^class " "$VERSIONED_FILE" | sed 's/class \([^ ]*\).*/\1/')
+          # Create default formula from template
+          DEFAULT_FILE="Formula/${DEFAULT_FORMULA}.rb"
+          envsubst '$FORMULA_CLASS $FORMULA_DESC $VERSION_TAG $VERSIONED_FORMULA' < formula-default.rb > "$DEFAULT_FILE"
 
-          # Extract the versioned bottle SHA256 to replace it
-          VERSIONED_BOTTLE_SHA256=$(grep "sha256 cellar:" "$VERSIONED_FILE" | sed -n 's/.*arm64_sonoma: "\([^"]*\)".*/\1/p')
-
-          # Convert default formula name to class name
-          DEFAULT_CLASS=$(echo "$DEFAULT_FORMULA" | sed 's/@/AT/g; s/-/_/g' | awk -F'_' '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)} 1' OFS='')
-
-          # Copy versioned formula, update class name and bottle SHA256
-          sed "s/class ${VERSIONED_CLASS}/class ${DEFAULT_CLASS}/" "$VERSIONED_FILE" | \
-            sed "s/${VERSIONED_BOTTLE_SHA256}/${DEFAULT_BOTTLE_SHA256}/" > "$DEFAULT_FILE"
-
-          echo "Created default formula: $DEFAULT_FILE (class ${DEFAULT_CLASS})"
-          echo "Updated bottle SHA256 from ${VERSIONED_BOTTLE_SHA256} to ${DEFAULT_BOTTLE_SHA256}"
-          head -n 11 "$DEFAULT_FILE"
+          echo "Created default formula: $DEFAULT_FILE"
+          echo "Formula contents:"
+          head -11 "$DEFAULT_FILE"
 
       - name: Commit formula updates
         env:
