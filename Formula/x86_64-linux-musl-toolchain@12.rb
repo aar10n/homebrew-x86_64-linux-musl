@@ -2,7 +2,7 @@ class X8664LinuxMuslToolchainAT12 < Formula
   desc "Cross-compilation toolchain for x86_64-linux-musl target"
   homepage "https://github.com/aar10n/x86_64-linux-musl"
   url "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/12.1.0.tar.gz"
-  sha256 "13c89a89170e59b39fe4bbcbe1891cec2701624602bd1b3b4445acf4d511e6c9"
+  sha256 "04b41f29397b66aebc187bdef6bb76d742960db3fafec13cc10851880587f9bb"
   license "MIT"
 
   bottle do
@@ -37,12 +37,10 @@ class X8664LinuxMuslToolchainAT12 < Formula
       opoo "No GCC found. Attempting to use system compiler."
     end
 
-    # Set up local.mk to override installation directory and musl source
+    # Set up local.mk to override installation directory
     local_mk = <<~EOS
       TOOL_ROOT = #{prefix}
       BUILD_DIR = #{buildpath}/build
-      MUSL_GIT_URL = git://git.musl-libc.org/musl
-      MUSL_GIT_BRANCH = master
     EOS
 
     if real_gcc
@@ -92,7 +90,7 @@ class X8664LinuxMuslToolchainAT12 < Formula
         #{opt_prefix}
 
       Add the toolchain to your PATH:
-        export PATH="#{opt_prefix}/bin:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+        export PATH="#{opt_prefix}/bin:$PATH"
 
       Or use the cross-compilation prefix directly:
         x86_64-linux-musl-gcc hello.c -o hello

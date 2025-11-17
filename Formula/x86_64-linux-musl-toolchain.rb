@@ -1,76 +1,37 @@
 class X8664LinuxMuslToolchain < Formula
   desc "Cross-compilation toolchain for x86_64-linux-musl target"
   homepage "https://github.com/aar10n/x86_64-linux-musl"
-  url "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/12.1.0.tar.gz"
-  sha256 "13c89a89170e59b39fe4bbcbe1891cec2701624602bd1b3b4445acf4d511e6c9"
+  url "file:///dev/null"
+  sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  version "12.1.0"
   license "MIT"
 
-  bottle do
-    root_url "https://github.com/aar10n/homebrew-x86_64-linux-musl/releases/download/12.1.0"
-    sha256 cellar: :any, arm64_sonoma: "97f3507573bcfb62904732e10b6173b095c6a867e5e159046d667bd9fe12fe0f"
-  end
-
-  depends_on "wget" => :build
-  depends_on "coreutils" => :build
-  depends_on "gnu-sed" => :build
-  depends_on "make" => :build
-  depends_on "texinfo" => :build
-  depends_on "bison" => :build
-  depends_on "flex" => :build
-  depends_on "gcc@14" => :build
-  depends_on "gmp"
-  depends_on "mpfr"
-  depends_on "libmpc"
-  depends_on "isl"
-
-  keg_only :provided_by_macos, "to avoid conflicts with other toolchains"
+  # This is a wrapper formula that depends on the versioned formula
+  depends_on "aar10n/x86_64-linux-musl/x86_64-linux-musl-toolchain@12"
 
   def install
-    # Use real GCC if available (not clang)
-    gcc_14 = Formula["gcc@14"] if Formula["gcc@14"].any_version_installed?
-    gcc_13 = Formula["gcc@13"] if Formula["gcc@13"].any_version_installed?
-    gcc_12 = Formula["gcc@12"] if Formula["gcc@12"].any_version_installed?
+    # This formula is a wrapper around the versioned formula
+    # The actual toolchain is provided by the dependency
 
-    real_gcc = gcc_14 || gcc_13 || gcc_12
+    # Get the versioned formula's opt_prefix
+    versioned_formula = Formula["aar10n/x86_64-linux-musl/x86_64-linux-musl-toolchain@12"]
 
-    unless real_gcc
-      opoo "No GCC found. Attempting to use system compiler."
-    end
+    # Create a marker file to indicate this is a wrapper installation
+    (prefix/"WRAPPER_FORMULA").write <<~EOS
+      This is a wrapper formula that provides the default (non-versioned) installation.
 
-    # Set up local.mk to override installation directory and musl source
-    local_mk = <<~EOS
-      TOOL_ROOT = #{prefix}
-      BUILD_DIR = #{buildpath}/build
-      MUSL_GIT_URL = git://git.musl-libc.org/musl
-      MUSL_GIT_BRANCH = master
+      The actual toolchain is provided by: x86_64-linux-musl-toolchain@12
+      Toolchain location: #{versioned_formula.opt_prefix}
     EOS
 
-    if real_gcc
-      gcc_bin = "#{real_gcc.opt_bin}/gcc-#{real_gcc.version.major}"
-      gxx_bin = "#{real_gcc.opt_bin}/g++-#{real_gcc.version.major}"
-      local_mk += <<~EOS
-        HOST_CC = #{gcc_bin}
-        HOST_CXX = #{gxx_bin}
-      EOS
+    # Symlink only binaries, not entire directories (to avoid Homebrew post-processing issues)
+    Dir.glob("#{versioned_formula.opt_bin}/*").each do |binary|
+      bin.install_symlink binary
     end
-
-    (buildpath/"local.mk").write local_mk
-
-    # Build the toolchain using make directly
-    system "make", "autoconf", "binutils", "gcc", "musl"
-
-    # Remove unprefixed autoconf binaries to avoid conflicts
-    # autoconf is built as a prerequisite but shouldn't be in the final installation
-    Dir.glob(prefix/"bin/autoconf*").each { |f| File.delete(f) }
-    Dir.glob(prefix/"bin/autom4te*").each { |f| File.delete(f) }
-    Dir.glob(prefix/"bin/auto{header,reconf,scan,update}").each { |f| File.delete(f) if File.exist?(f) }
-    Dir.glob(prefix/"bin/ifnames").each { |f| File.delete(f) if File.exist?(f) }
-
-    # Verify installation
-    raise "Toolchain installation failed" unless (prefix/"bin/x86_64-linux-musl-gcc").exist?
   end
 
   test do
+    # Test that the symlinked gcc works
     (testpath/"hello.c").write <<~EOS
       #include <stdio.h>
       int main() {
@@ -87,12 +48,19 @@ class X8664LinuxMuslToolchain < Formula
   end
 
   def caveats
+    versioned_formula = Formula["aar10n/x86_64-linux-musl/x86_64-linux-musl-toolchain@12"]
+
     <<~EOS
+      This is a wrapper formula for x86_64-linux-musl-toolchain@12.
+
       The x86_64-linux-musl toolchain has been installed to:
         #{opt_prefix}
 
+      The actual toolchain is located at:
+        #{versioned_formula.opt_prefix}
+
       Add the toolchain to your PATH:
-        export PATH="#{opt_prefix}/bin:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+        export PATH="#{opt_prefix}/bin:$PATH"
 
       Or use the cross-compilation prefix directly:
         x86_64-linux-musl-gcc hello.c -o hello
