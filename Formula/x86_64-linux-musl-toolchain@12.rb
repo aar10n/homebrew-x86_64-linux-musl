@@ -98,8 +98,8 @@ class X8664LinuxMuslToolchainAT12 < Formula
         x86_64-linux-musl-gcc hello.c -o hello
 
       The toolchain includes:
-        - binutils 2.38 (assembler, linker, etc.)
-        - GCC (C and C++ support)
+        - binutils
+        - gcc
         - musl libc
     EOS
   end
