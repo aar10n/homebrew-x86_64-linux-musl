@@ -18,8 +18,7 @@ class X8664LinuxMuslToolchainOsdev < Formula
 
     # Create a marker file to indicate this is a wrapper installation
     (prefix/"WRAPPER_FORMULA").write <<~EOS
-      This is a wrapper formula that provides the default (non-versioned) installation
-      of x86_64-linux-musl-toolchain-osdev.
+      This is a wrapper formula that provides the default (non-versioned) installation.
 
       The actual toolchain is provided by: x86_64-linux-musl-toolchain-osdev@12
       Toolchain location: #{versioned_formula.opt_prefix}
@@ -54,7 +53,7 @@ class X8664LinuxMuslToolchainOsdev < Formula
     <<~EOS
       This is a wrapper formula for x86_64-linux-musl-toolchain-osdev@12.
 
-      The x86_64-linux-musl toolchain (osdev variant) has been installed to:
+      The x86_64-linux-musl toolchain has been installed to:
         #{opt_prefix}
 
       The actual toolchain is located at:
@@ -69,7 +68,7 @@ class X8664LinuxMuslToolchainOsdev < Formula
       The toolchain includes:
         - binutils
         - gcc
-        - musl libc (osdev variant)
+        - musl libc
     EOS
   end
 end

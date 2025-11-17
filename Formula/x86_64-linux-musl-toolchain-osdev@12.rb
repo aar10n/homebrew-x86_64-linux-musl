@@ -2,7 +2,7 @@ class X8664LinuxMuslToolchainOsdevAT12 < Formula
   desc "Cross-compilation toolchain for x86_64-linux-musl target"
   homepage "https://github.com/aar10n/x86_64-linux-musl"
   url "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/12.1.0-osdev.tar.gz"
-  sha256 "08554090374c7392b20c7f28609d296bffda74883b3669c6fa3fb0b243ee92ff"
+  sha256 "b443aba42d37975d1193164b16752514e5c8f54b98e39455611661941a8e4a81"
   license "MIT"
 
   bottle do
@@ -90,7 +90,7 @@ class X8664LinuxMuslToolchainOsdevAT12 < Formula
         #{opt_prefix}
 
       Add the toolchain to your PATH:
-        export PATH="#{opt_prefix}/bin:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+        export PATH="#{opt_prefix}/bin:$PATH"
 
       Or use the cross-compilation prefix directly:
         x86_64-linux-musl-gcc hello.c -o hello
