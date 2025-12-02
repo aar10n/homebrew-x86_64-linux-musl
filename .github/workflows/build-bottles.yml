@@ -7,14 +7,22 @@ on:
         description: "Version tag (e.g., 12.1.0 or 13.4.2-osdev)"
         required: true
         type: string
+      arch:
+        description: "Target macOS architecture"
+        required: false
+        default: arm64
+        type: choice
+        options:
+          - arm64
+          - intel
 
 permissions:
   contents: write
 
 jobs:
   build-bottles:
-    name: Build bottle for Apple Silicon
-    runs-on: macos-14
+    name: Build bottle
+    runs-on: ${{ inputs.arch == 'intel' && 'macos-13' || 'macos-14' }}
 
     steps:
       - name: Checkout tap repository
@@ -24,6 +32,7 @@ jobs:
         id: prepare
         env:
           VERSION_TAG: ${{ inputs.version }}
+          ARCH: ${{ inputs.arch }}
         run: |
           # Extract GCC major version (first number)
           GCC_MAJOR=$(echo "$VERSION_TAG" | grep -oE '^[0-9]+' | head -1)
@@ -37,12 +46,25 @@ jobs:
             VERSIONED_FORMULA="x86_64-linux-musl-toolchain@${GCC_MAJOR}"
           fi
 
+          # Determine runner/bottle tag based on architecture
+          if [[ "$ARCH" == "intel" ]]; then
+            # macos-13 is Intel Ventura
+            BOTTLE_TAG="ventura"
+            PLATFORM_LABEL="x86_64_ventura"
+          else
+            BOTTLE_TAG="arm64_sonoma"
+            PLATFORM_LABEL="arm64_sonoma"
+          fi
+
           echo "versioned_formula=${VERSIONED_FORMULA}" >> $GITHUB_OUTPUT
           echo "variant_suffix=${VARIANT_SUFFIX}" >> $GITHUB_OUTPUT
           echo "gcc_major=${GCC_MAJOR}" >> $GITHUB_OUTPUT
+          echo "bottle_tag=${BOTTLE_TAG}" >> $GITHUB_OUTPUT
+          echo "platform_label=${PLATFORM_LABEL}" >> $GITHUB_OUTPUT
 
           echo "Formula: ${VERSIONED_FORMULA}"
           echo "Variant: ${VARIANT_SUFFIX:-official musl}"
+          echo "Platform: ${PLATFORM_LABEL}"
 
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@master
@@ -67,6 +89,7 @@ jobs:
           VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
           VARIANT_SUFFIX: ${{ steps.prepare.outputs.variant_suffix }}
           GCC_MAJOR: ${{ steps.prepare.outputs.gcc_major }}
+          BOTTLE_TAG: ${{ steps.prepare.outputs.bottle_tag }}
         run: |
           # Download source tarball to calculate SHA256
           wget -q "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/${VERSION_TAG}.tar.gz"
@@ -85,10 +108,11 @@ jobs:
 
           # Bottle SHA will be calculated later, use placeholder for now
           export BOTTLE_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+          export BOTTLE_TAG="${BOTTLE_TAG}"
 
           # Create versioned formula from template
           VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
-          envsubst '$FORMULA_CLASS $VERSION_TAG $SOURCE_SHA256 $BOTTLE_SHA256' < formula-versioned.rb > "$VERSIONED_FILE"
+          envsubst '$FORMULA_CLASS $VERSION_TAG $SOURCE_SHA256 $BOTTLE_SHA256 $BOTTLE_TAG' < formula-versioned.rb > "$VERSIONED_FILE"
 
           echo "Created versioned formula: $VERSIONED_FILE"
           cat "$VERSIONED_FILE" | head -15
@@ -154,6 +178,7 @@ jobs:
         id: bottle
         env:
           VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
+          BOTTLE_TAG: ${{ steps.prepare.outputs.bottle_tag }}
         run: |
           ROOT_URL="https://github.com/${{ github.repository }}/releases/download/${{ inputs.version }}"
           brew bottle --json --root-url="${ROOT_URL}" ${VERSIONED_FORMULA}
@@ -165,7 +190,7 @@ jobs:
           echo "bottle_json=${BOTTLE_JSON}" >> $GITHUB_OUTPUT
 
           # Extract SHA256 from JSON - the key might be the formula name or have version suffix
-          SHA256=$(python3 -c "import json; data = json.load(open('${BOTTLE_JSON}')); key = list(data.keys())[0]; print(data[key]['bottle']['tags']['arm64_sonoma']['sha256'])")
+          SHA256=$(python3 -c "import json; data = json.load(open('${BOTTLE_JSON}')); key = list(data.keys())[0]; print(data[key]['bottle']['tags']['${BOTTLE_TAG}']['sha256'])")
           echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
 
           SIZE=$(du -h "${BOTTLE_FILE}" | cut -f1)
@@ -177,7 +202,7 @@ jobs:
       - name: Upload bottle as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bottle-arm64_sonoma
+          name: bottle-${{ steps.prepare.outputs.platform_label }}
           path: |
             ${{ steps.bottle.outputs.bottle_file }}
             ${{ steps.bottle.outputs.bottle_json }}
@@ -185,9 +210,9 @@ jobs:
 
       - name: Save bottle metadata
         run: |
-          cat > bottle-info-arm64_sonoma.json << EOF
+          cat > bottle-info-${{ steps.prepare.outputs.platform_label }}.json << EOF
           {
-            "platform": "arm64_sonoma",
+            "platform": "${{ steps.prepare.outputs.platform_label }}",
             "sha256": "${{ steps.bottle.outputs.sha256 }}",
             "filename": "${{ steps.bottle.outputs.bottle_file }}",
             "size": "${{ steps.bottle.outputs.size }}"
@@ -197,21 +222,22 @@ jobs:
       - name: Upload metadata
         uses: actions/upload-artifact@v4
         with:
-          name: metadata-arm64_sonoma
-          path: bottle-info-arm64_sonoma.json
+          name: metadata-${{ steps.prepare.outputs.platform_label }}
+          path: bottle-info-${{ steps.prepare.outputs.platform_label }}.json
           retention-days: 30
 
       - name: Create summary
         env:
           VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
           VARIANT_SUFFIX: ${{ steps.prepare.outputs.variant_suffix }}
+          PLATFORM_LABEL: ${{ steps.prepare.outputs.platform_label }}
         run: |
           {
             echo "# 🍾 Bottle Built"
             echo ""
             echo "**Version:** ${{ inputs.version }}"
             echo "**Variant:** ${VARIANT_SUFFIX:-official musl}"
-            echo "**Platform:** arm64_sonoma"
+            echo "**Platform:** ${PLATFORM_LABEL}"
             echo ""
             echo "Bottle has been uploaded as a workflow artifact."
             echo "Run the 'Publish Bottles' workflow to publish it to a release."

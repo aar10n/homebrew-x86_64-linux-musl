@@ -7,7 +7,7 @@ class ${FORMULA_CLASS} < Formula
 
   bottle do
     root_url "https://github.com/aar10n/homebrew-x86_64-linux-musl/releases/download/${VERSION_TAG}"
-    sha256 cellar: :any, arm64_sonoma: "${BOTTLE_SHA256}"
+    sha256 cellar: :any, ${BOTTLE_TAG}: "${BOTTLE_SHA256}"
   end
 
   depends_on "wget" => :build

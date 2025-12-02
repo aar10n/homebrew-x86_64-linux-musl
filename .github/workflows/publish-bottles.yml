@@ -16,6 +16,14 @@ on:
         required: false
         type: boolean
         default: false
+      arch:
+        description: "Target macOS architecture"
+        required: false
+        default: arm64
+        type: choice
+        options:
+          - arm64
+          - intel
 
 permissions:
   contents: write
@@ -35,6 +43,7 @@ jobs:
         id: determine
         env:
           VERSION: ${{ inputs.version }}
+          ARCH: ${{ inputs.arch }}
         run: |
           # Parse version to extract GCC major version and variant
           # Examples: 12.1.0 -> gcc12, 13.4.2-osdev -> gcc13-osdev
@@ -55,11 +64,22 @@ jobs:
             BASE_FORMULA="x86_64-linux-musl"  # For finding old formula
           fi
 
+          # Determine bottle tag/platform label from architecture
+          if [[ "$ARCH" == "intel" ]]; then
+            BOTTLE_TAG="ventura"
+            PLATFORM_LABEL="x86_64_ventura"
+          else
+            BOTTLE_TAG="arm64_sonoma"
+            PLATFORM_LABEL="arm64_sonoma"
+          fi
+
           echo "versioned_formula=${VERSIONED_NAME}" >> $GITHUB_OUTPUT
           echo "default_formula=${DEFAULT_NAME}" >> $GITHUB_OUTPUT
           echo "base_formula=${BASE_FORMULA}" >> $GITHUB_OUTPUT
           echo "gcc_major=${GCC_MAJOR}" >> $GITHUB_OUTPUT
           echo "variant_suffix=${VARIANT_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "bottle_tag=${BOTTLE_TAG}" >> $GITHUB_OUTPUT
+          echo "platform_label=${PLATFORM_LABEL}" >> $GITHUB_OUTPUT
 
           echo "Creating versioned formula: ${VERSIONED_NAME}"
           if [[ "${{ inputs.is_default }}" == "true" ]]; then
@@ -167,9 +187,11 @@ jobs:
           SOURCE_SHA256: ${{ steps.source_sha.outputs.sha256 }}
           VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
           VARIANT_SUFFIX: ${{ steps.determine.outputs.variant_suffix }}
+          BOTTLE_TAG: ${{ steps.determine.outputs.bottle_tag }}
+          PLATFORM_LABEL: ${{ steps.determine.outputs.platform_label }}
         run: |
           # Extract bottle SHA256 from metadata
-          export BOTTLE_SHA256=$(jq -r '.sha256' */bottle-info-arm64_sonoma.json)
+          export BOTTLE_SHA256=$(jq -r '.sha256' */bottle-info-${PLATFORM_LABEL}.json)
 
           # Convert formula class name
           # x86_64-linux-musl-toolchain@12 -> X8664LinuxMuslToolchainAT12
@@ -179,7 +201,60 @@ jobs:
 
           # Create versioned formula from template
           VERSIONED_FILE="Formula/${VERSIONED_FORMULA}.rb"
-          envsubst '$FORMULA_CLASS $VERSION_TAG $SOURCE_SHA256 $BOTTLE_SHA256' < formula-versioned.rb > "$VERSIONED_FILE"
+          if [[ -f "$VERSIONED_FILE" ]]; then
+            cp "$VERSIONED_FILE" "${VERSIONED_FILE}.existing"
+          fi
+
+          envsubst '$FORMULA_CLASS $VERSION_TAG $SOURCE_SHA256 $BOTTLE_SHA256 $BOTTLE_TAG' < formula-versioned.rb > "$VERSIONED_FILE"
+
+          # If we already have bottles for this version (e.g., another arch), merge tags
+          if [[ -f "${VERSIONED_FILE}.existing" ]]; then
+            python3 - "$VERSIONED_FILE" "${VERSION_TAG}" <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          new_path = Path(sys.argv[1])
+          version_tag = sys.argv[2]
+          existing_path = Path(str(new_path) + ".existing")
+
+          if not existing_path.exists():
+              sys.exit(0)
+
+          new_text = new_path.read_text()
+          old_text = existing_path.read_text()
+
+          # Only merge if we're working on the same version
+          same_version = version_tag in old_text
+          if not same_version:
+              existing_path.unlink()
+              sys.exit(0)
+
+          tag_re = re.compile(r'sha256\s+cellar:\s*:any[^,]*,\s*([a-z0-9_]+):\s*"([0-9a-f]{64})"')
+          old_tags = {tag: sha for tag, sha in tag_re.findall(old_text)}
+          new_tags = {tag: sha for tag, sha in tag_re.findall(new_text)}
+
+          # Keep all existing tags, override with any new ones (this run's arch)
+          combined = {**old_tags, **new_tags}
+
+          root_url_line = None
+          for line in new_text.splitlines():
+              if line.strip().startswith("root_url"):
+                  root_url_line = line.strip()
+                  break
+
+          if not root_url_line:
+              raise SystemExit("root_url not found in bottle block")
+
+          tag_lines = [f'    sha256 cellar: :any, {tag}: "{sha}"' for tag, sha in sorted(combined.items())]
+          new_block = "  bottle do\n    " + root_url_line + "\n" + "\n".join(tag_lines) + "\n  end"
+
+          new_text = re.sub(r'(?ms)^  bottle do.*?^  end', new_block, new_text)
+          new_path.write_text(new_text)
+          existing_path.unlink()
+            PY
+          fi
 
           echo "Created versioned formula: $VERSIONED_FILE"
           echo "Formula contents:"
@@ -246,6 +321,7 @@ jobs:
         env:
           VERSIONED_FORMULA: ${{ steps.determine.outputs.versioned_formula }}
           DEFAULT_FORMULA: ${{ steps.determine.outputs.default_formula }}
+          PLATFORM_LABEL: ${{ steps.determine.outputs.platform_label }}
         run: |
           {
             echo "# 🍾 Bottle Published"
@@ -255,6 +331,7 @@ jobs:
             if [[ "${{ inputs.is_default }}" == "true" ]]; then
               echo "**Default:** Yes (${DEFAULT_FORMULA})"
             fi
+            echo "**Platform:** ${PLATFORM_LABEL}"
             echo ""
             echo "## Installation"
             echo '```bash'
