@@ -139,7 +139,9 @@ jobs:
           # setup-homebrew already created a symlink for our tap, so we can use it directly
           # List all formulas in the tap to verify
           brew search aar10n/x86_64-linux-musl/ || true
-          ls -la "/opt/homebrew/Library/Taps/aar10n/homebrew-x86_64-linux-musl/Formula/"
+          TAP_PATH="$(brew --repo aar10n/x86_64-linux-musl)"
+          echo "Tap path: ${TAP_PATH}"
+          ls -la "${TAP_PATH}/Formula/" || find "${TAP_PATH}" -maxdepth 2 -type f
 
           # Now build the bottle (use full tap/formula syntax)
           brew install --build-bottle --verbose "aar10n/x86_64-linux-musl/${VERSIONED_FORMULA}"
