@@ -8,6 +8,7 @@ class X8664LinuxMuslToolchainAT12 < Formula
   bottle do
     root_url "https://github.com/aar10n/homebrew-x86_64-linux-musl/releases/download/12.1.0"
     sha256 cellar: :any, arm64_sonoma: "de3a1624f8825c0af501224e53f0a50542074c662bc0b357eca677183e50a6c6"
+    sha256 cellar: :any, x86_64_linux: "76a3520060fc1b9c62bf61d2850526a5e9e33fd20abadc7412a23989c000a1c2"
   end
 
   depends_on "wget" => :build
