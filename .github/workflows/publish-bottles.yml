@@ -261,7 +261,7 @@ jobs:
           new_text = re.sub(r'(?ms)^  bottle do.*?^  end', new_block, new_text)
           new_path.write_text(new_text)
           existing_path.unlink()
-            PY
+          PY
           fi
 
           echo "Created versioned formula: $VERSIONED_FILE"
