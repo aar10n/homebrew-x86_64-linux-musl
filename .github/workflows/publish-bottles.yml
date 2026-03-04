@@ -17,13 +17,14 @@ on:
         type: boolean
         default: false
       arch:
-        description: "Target macOS architecture"
+        description: "Target architecture"
         required: false
         default: arm64
         type: choice
         options:
           - arm64
           - intel
+          - linux
 
 permissions:
   contents: write
@@ -65,7 +66,10 @@ jobs:
           fi
 
           # Determine bottle tag/platform label from architecture
-          if [[ "$ARCH" == "intel" ]]; then
+          if [[ "$ARCH" == "linux" ]]; then
+            BOTTLE_TAG="x86_64_linux"
+            PLATFORM_LABEL="x86_64_linux"
+          elif [[ "$ARCH" == "intel" ]]; then
             BOTTLE_TAG="ventura"
             PLATFORM_LABEL="x86_64_ventura"
           else
@@ -112,7 +116,11 @@ jobs:
         run: |
           # Download source tarball from the x86_64-linux-musl repo (not the tap repo)
           wget -q "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/${{ inputs.version }}.tar.gz"
-          SOURCE_SHA=$(shasum -a 256 "${{ inputs.version }}.tar.gz" | awk '{print $1}')
+          if command -v shasum &>/dev/null; then
+            SOURCE_SHA=$(shasum -a 256 "${{ inputs.version }}.tar.gz" | awk '{print $1}')
+          else
+            SOURCE_SHA=$(sha256sum "${{ inputs.version }}.tar.gz" | awk '{print $1}')
+          fi
           echo "sha256=${SOURCE_SHA}" >> $GITHUB_OUTPUT
           rm "${{ inputs.version }}.tar.gz"
 

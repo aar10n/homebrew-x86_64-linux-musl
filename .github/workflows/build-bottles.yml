@@ -8,13 +8,14 @@ on:
         required: true
         type: string
       arch:
-        description: "Target macOS architecture"
+        description: "Target architecture"
         required: false
         default: arm64
         type: choice
         options:
           - arm64
           - intel
+          - linux
 
 permissions:
   contents: write
@@ -22,7 +23,7 @@ permissions:
 jobs:
   build-bottles:
     name: Build bottle
-    runs-on: ${{ inputs.arch == 'intel' && 'macos-13' || 'macos-14' }}
+    runs-on: ${{ inputs.arch == 'linux' && 'ubuntu-latest' || (inputs.arch == 'intel' && 'macos-13' || 'macos-14') }}
 
     steps:
       - name: Checkout tap repository
@@ -47,7 +48,10 @@ jobs:
           fi
 
           # Determine runner/bottle tag based on architecture
-          if [[ "$ARCH" == "intel" ]]; then
+          if [[ "$ARCH" == "linux" ]]; then
+            BOTTLE_TAG="x86_64_linux"
+            PLATFORM_LABEL="x86_64_linux"
+          elif [[ "$ARCH" == "intel" ]]; then
             # macos-13 is Intel Ventura
             BOTTLE_TAG="ventura"
             PLATFORM_LABEL="x86_64_ventura"
@@ -71,13 +75,22 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install gcc@14 wget coreutils texinfo gettext || true
+          if [[ "${{ inputs.arch }}" == "linux" ]]; then
+            # On Linux, install build essentials via apt first
+            sudo apt-get update
+            sudo apt-get install -y build-essential texinfo bison flex wget
 
-          # Retry texinfo post-install if it failed
-          brew postinstall texinfo 2>/dev/null || true
+            # Install remaining deps via Homebrew
+            brew install gcc@14 || true
+          else
+            brew install gcc@14 wget coreutils texinfo gettext || true
 
-          # Ensure texinfo is in PATH
-          export PATH="$(brew --prefix texinfo)/bin:$PATH"
+            # Retry texinfo post-install if it failed
+            brew postinstall texinfo 2>/dev/null || true
+
+            # Ensure texinfo is in PATH
+            export PATH="$(brew --prefix texinfo)/bin:$PATH"
+          fi
 
           # Verify makeinfo is available
           which makeinfo
@@ -93,7 +106,11 @@ jobs:
         run: |
           # Download source tarball to calculate SHA256
           wget -q "https://github.com/aar10n/x86_64-linux-musl/archive/refs/tags/${VERSION_TAG}.tar.gz"
-          export SOURCE_SHA256=$(shasum -a 256 "${VERSION_TAG}.tar.gz" | awk '{print $1}')
+          if command -v shasum &>/dev/null; then
+            export SOURCE_SHA256=$(shasum -a 256 "${VERSION_TAG}.tar.gz" | awk '{print $1}')
+          else
+            export SOURCE_SHA256=$(sha256sum "${VERSION_TAG}.tar.gz" | awk '{print $1}')
+          fi
           rm "${VERSION_TAG}.tar.gz"
 
           # Convert formula class name to match Homebrew's conventions
@@ -133,8 +150,10 @@ jobs:
           HOMEBREW_MAKE_JOBS: 1
         run: |
           # Ensure texinfo/makeinfo is in PATH for the build
-          export PATH="$(brew --prefix texinfo)/bin:$PATH"
-          export PATH="$(brew --prefix bison)/bin:$PATH"
+          if [[ "${{ inputs.arch }}" != "linux" ]]; then
+            export PATH="$(brew --prefix texinfo)/bin:$PATH"
+            export PATH="$(brew --prefix bison)/bin:$PATH"
+          fi
 
           # setup-homebrew already created a symlink for our tap, so we can use it directly
           # List all formulas in the tap to verify
@@ -152,7 +171,11 @@ jobs:
           VERSIONED_FORMULA: ${{ steps.prepare.outputs.versioned_formula }}
         run: |
           echo "=== Build failed. Displaying full logs ==="
-          LOG_FILE=$(ls -t ~/Library/Logs/Homebrew/${VERSIONED_FORMULA}/*.log 2>/dev/null | head -1)
+          if [[ "${{ inputs.arch }}" == "linux" ]]; then
+            LOG_FILE=$(ls -t ~/.cache/Homebrew/Logs/${VERSIONED_FORMULA}/*.log 2>/dev/null | head -1)
+          else
+            LOG_FILE=$(ls -t ~/Library/Logs/Homebrew/${VERSIONED_FORMULA}/*.log 2>/dev/null | head -1)
+          fi
           if [ -n "$LOG_FILE" ]; then
             echo "Full log from: $LOG_FILE"
             cat "$LOG_FILE"

@@ -23,7 +23,7 @@ class X8664LinuxMuslToolchainAT12 < Formula
   depends_on "libmpc"
   depends_on "isl"
 
-  keg_only :provided_by_macos, "to avoid conflicts with other toolchains"
+  keg_only "to avoid conflicts with other toolchains"
 
   def install
     # Use real GCC if available (not clang)
